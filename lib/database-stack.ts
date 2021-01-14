@@ -2,22 +2,38 @@ import * as cdk from "@aws-cdk/core";
 import * as rds from "@aws-cdk/aws-rds";
 import * as ec2 from "@aws-cdk/aws-ec2";
 import * as iam from "@aws-cdk/aws-iam";
+import secretsmanager = require("@aws-cdk/aws-secretsmanager");
 
 export interface DatabaseStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
 }
 
 export class DatabaseStack extends cdk.Stack {
+  public readonly masterDbPasswordSecret: secretsmanager.ISecret;
+  public readonly dbClusterEndpoint: rds.Endpoint;
+  public readonly dbClusterSecurityGroup: ec2.ISecurityGroup;
+
   constructor(scope: cdk.Construct, id: string, props: DatabaseStackProps) {
     super(scope, id, props);
 
     const { vpc } = props;
 
+    this.masterDbPasswordSecret = new secretsmanager.Secret(
+      this,
+      "MasterPassword",
+      {
+        generateSecretString: { excludePunctuation: true, includeSpace: false },
+      }
+    );
+
     const cluster = new rds.DatabaseCluster(this, "Database", {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
         version: rds.AuroraPostgresEngineVersion.VER_11_9,
       }),
-      credentials: rds.Credentials.fromGeneratedSecret("clusteradmin"),
+      credentials: {
+        username: "master",
+        password: this.masterDbPasswordSecret.secretValue,
+      },
       instances: 1,
       instanceProps: {
         instanceType: ec2.InstanceType.of(
@@ -30,6 +46,7 @@ export class DatabaseStack extends cdk.Stack {
         vpc,
       },
     });
+    this.dbClusterEndpoint = cluster.clusterEndpoint;
 
     const postgresRestoreRole = new iam.Role(this, "PostgresRestoreRole", {
       assumedBy: new iam.ServicePrincipal("ec2"),
@@ -41,16 +58,7 @@ export class DatabaseStack extends cdk.Stack {
     );
 
     const userData = ec2.UserData.forLinux();
-    userData.addCommands(
-      "yum -y install ec2-instance-connect"
-      // 'curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"',
-      // "unzip -q awscliv2.zip",
-      // "./aws/install",
-      // "rm -dr aws awscliv2.zip",
-      // "yum remove -y postgresql postgresql-server",
-      // "yum install -y https://download.postgresql.org/pub/repos/yum/11/redhat/rhel-6-x86_64/postgresql11-libs-11.4-1PGDG.rhel6.x86_64.rpm",
-      // "yum install -y https://download.postgresql.org/pub/repos/yum/11/redhat/rhel-6-x86_64/postgresql11-11.4-1PGDG.rhel6.x86_64.rpm"
-    );
+    userData.addCommands("yum -y install ec2-instance-connect");
 
     const jumpbox = new ec2.Instance(this, "Jumpbox", {
       vpc,
@@ -73,5 +81,7 @@ export class DatabaseStack extends cdk.Stack {
     });
 
     cluster.connections.allowDefaultPortFrom(jumpbox);
+
+    this.dbClusterSecurityGroup = cluster.connections.securityGroups[0];
   }
 }

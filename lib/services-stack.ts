@@ -1,20 +1,29 @@
 import * as cdk from "@aws-cdk/core";
 import ec2 = require("@aws-cdk/aws-ec2");
 import ecs = require("@aws-cdk/aws-ecs");
-import route53 = require("@aws-cdk/aws-route53");
 import rds = require("@aws-cdk/aws-rds");
 import elbv2 = require("@aws-cdk/aws-elasticloadbalancingv2");
 import logs = require("@aws-cdk/aws-logs");
+import cr = require("@aws-cdk/custom-resources");
+import secretsmanager = require("@aws-cdk/aws-secretsmanager");
 
 export interface ServicesStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
+  masterDbPasswordSecret: secretsmanager.ISecret;
+  dbClusterEndpoint: rds.Endpoint;
+  dbClusterSecurityGroup: ec2.ISecurityGroup;
 }
 
 export class ServicesStack extends cdk.Stack {
   constructor(scope: cdk.Construct, id: string, props: ServicesStackProps) {
     super(scope, id, props);
 
-    const { vpc } = props;
+    const {
+      vpc,
+      masterDbPasswordSecret,
+      dbClusterEndpoint,
+      dbClusterSecurityGroup,
+    } = props;
 
     const cluster = new ecs.Cluster(this, "Cluster", { vpc });
 
@@ -24,26 +33,45 @@ export class ServicesStack extends cdk.Stack {
       { memoryLimitMiB: 3072, cpu: 512 }
     );
 
+    const masterPasswordGetter = new cr.AwsCustomResource(
+      this,
+      "MasterPasswordGetter",
+      {
+        onUpdate: {
+          service: "SecretsManager",
+          action: "getSecretValue",
+          parameters: { SecretId: masterDbPasswordSecret.secretArn },
+          physicalResourceId: cr.PhysicalResourceId.of("MasterPasswordGetter"),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+          resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+        }),
+      }
+    );
+    const masterPassword = masterPasswordGetter.getResponseField(
+      "SecretString"
+    );
+
+    const securityGroup = new ec2.SecurityGroup(this, "SecurityGroup", {
+      vpc,
+    });
+
+    // Allow outgoing connections to Posgresql cluster
+    dbClusterSecurityGroup.addIngressRule(
+      securityGroup,
+      ec2.Port.tcp(dbClusterEndpoint.port),
+      "Postgresql access",
+      true
+    );
+
     const bpContainer = taskDefinition.addContainer("bp", {
       image: ecs.ContainerImage.fromRegistry("botpress/server:v12_16_2"),
       entryPoint: ["/bin/sh", "-c"],
       command: ["./duckling -p 8000 & ./bp"],
       essential: true,
       environment: {
-        //   DATABASE_URL: `postgres://master:${dbPassword.secretValue}@${dbClusterEndpointAddress}/bpteam`,
-        //   REDIS_URL: `redis://${redisEndpointAddress}:${redisEndpointPort}`,
-        //   BP_PRODUCTION: "true",
-        //   BP_MODULES_PATH: "/botpress/modules:/botpress/additional-modules",
-        //   BP_DECISION_MIN_NO_REPEAT: "1ms",
-        //   BPFS_STORAGE: "database",
-        //   EXTERNAL_URL: `https://${domain}`,
-        //   CLUSTER_ENABLED: "true",
-        //   PRO_ENABLED: "true",
-        //   BP_LICENSE_KEY: bpLicenseKey.toString(),
-        //   EXPOSED_PRIVATE_API_SECRET: bpApiSecret.toString(),
-        //   EXPOSED_API_KEY_GORDON: gordonApiKey.toString(),
-        //   EXPOSED_LICENSE_SERVER: "https://license.botpress.io/",
-        //   VERBOSITY_LEVEL: "3",
+        DATABASE_URL: `postgres://master:${masterPassword}@${dbClusterEndpoint.socketAddress}/testdb`,
+        BPFS_STORAGE: "database",
         AUTO_MIGRATE: "true",
         DATABASE_POOL: '{"min": 2, "max": 5}',
       },
@@ -51,16 +79,6 @@ export class ServicesStack extends cdk.Stack {
         logRetention: logs.RetentionDays.ONE_MONTH,
         streamPrefix: "bp",
       }),
-      // healthCheck: {
-      //   command: [
-      //     "CMD-SHELL",
-      //     "curl -f http://localhost:3000/status || exit 1",
-      //   ],
-      //   timeout: cdk.Duration.seconds(5),
-      //   retries: 3,
-      //   startPeriod: cdk.Duration.seconds(30),
-      //   interval: cdk.Duration.seconds(30),
-      // },
     });
 
     bpContainer.addPortMappings({ containerPort: 3000 });
@@ -68,6 +86,7 @@ export class ServicesStack extends cdk.Stack {
     const service = new ecs.FargateService(this, "Service", {
       cluster,
       taskDefinition,
+      securityGroups: [securityGroup],
     });
 
     const loadBalancer = new elbv2.ApplicationLoadBalancer(this, "LB", {
