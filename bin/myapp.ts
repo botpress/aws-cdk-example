@@ -6,6 +6,7 @@ import { DatabaseStack } from "../lib/database-stack";
 import { ServicesStack } from "../lib/services-stack";
 
 const app = new cdk.App();
+
 const { vpc } = new VpcStack(app, "VpcStack");
 
 const {
@@ -15,6 +16,7 @@ const {
 } = new DatabaseStack(app, "DatabaseStack", {
   vpc,
 });
+
 new ServicesStack(app, "ServicesStack", {
   vpc,
   masterDbPasswordSecret,
