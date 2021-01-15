@@ -4,6 +4,10 @@ An example of a AWS CDK app for a single-node deployment of Botpress, with a Pos
 
 ## Useful commands
 
+### Installation
+
+`npm i`
+
 ### Compiling
 
 `npm run-script watch`
